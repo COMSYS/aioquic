@@ -1,6 +1,55 @@
 aioquic
 =======
 
+Content of this forked repository
+--------------------
+
+This is a modified variant of ``aioquic`` with the intention of studying the performance of different `EFM algorithms <https://datatracker.ietf.org/doc/draft-mdt-ippm-explicit-flow-measurements/>`_ algorithms.
+
+
+Publication
+....
+
+It has been created in the context of and used for the following publication:
+
+* Ike Kunze, Klaus Wehrle, and Jan Rüth: *L, Q, R, and T - Which Spin Bit Cousin Is Here to Stay?*. In ANRW '21: Proceedings of the Applied Networking Research Workshop
+
+If you use any portion of our work, please consider citing our publication.
+
+.. code-block::
+
+    @Inproceedings{2021-kunze-efm-evaluation,
+    author = {Kunze, Ike and Wehrle, Klaus and R{\"u}th, Jan},
+    title = {L, Q, R, and T - Which Spin Bit Cousin Is Here to Stay?},
+    booktitle = {ANRW '21: Proceedings of the Applied Networking Research Workshop},
+    year = {2021},
+    month = {July},
+    doi = {10.1145/3472305.3472319}
+    }
+
+
+Modifications of this variant
+....
+- There is an additional byte after the `Spin Bit` (measurement header)
+    - It is enabled by default
+    - To disable the measurement header:
+        1. Set the `Active` attribute of the `Measurement_Headers` class in `src/aioquic/quic/__init__.py` to False
+        2. Set the `MeasurementHeaders` variable in `src/aioquic/_crypto.c` to something other than 1
+- The header protection has been removed from the two reserved bits in the short header as well as the measurement header (if it is enabled)
+- Datagram packets no longer count towards the `in flight` counting, i.e., congestion-control is effectively disabled (`src/aioquic/quic/packet.py`)
+- `src/aioquic/quic/packet_builder.py` contains **tested** end-host logic for the EFM variants focussing on loss (L|Q|R|T)
+    - There are also implementations for EFM variants focussing on delay (two variants of the delay bit, one variant for the VEC). These are **not tested** yet. Please use with caution.
+- By default, if the measurement header is active, **all** implemented EFM variants are active and are added to each outgoing packet (see `src/aioquic/quic/packet_builder.py` : `_end_packet`)
+    - If the measurement header is disabled, it is possible to precisely define which EFM variants should be mapped onto the two reserved bits of the real QUIC short header (see `src/aioquic/quic/configuration.py`)
+
+- Hooks for the EFM variants
+    - All EFM variants are hooked at the datagram reception in `src/aioquic/quic/connection.py` 
+    - The LBit implementation is further embedded in the loss detection in `src/aioquic/quic/recovery.py` 
+
+
+Original README
+---------------
+
 |rtd| |pypi-v| |pypi-pyversions| |pypi-l| |tests| |codecov| |black|
 
 .. |rtd| image:: https://readthedocs.org/projects/aioquic/badge/?version=latest

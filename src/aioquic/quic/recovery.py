@@ -5,6 +5,9 @@ from .logger import QuicLoggerTrace
 from .packet_builder import QuicDeliveryState, QuicSentPacket
 from .rangeset import RangeSet
 
+from .packet_builder import LBitCounter
+from .packet import is_long_header
+
 # loss detection
 K_PACKET_THRESHOLD = 3
 K_GRANULARITY = 0.001  # seconds
@@ -86,13 +89,15 @@ class QuicCongestionControl:
     New Reno congestion control.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, lbitCounter) -> None:
         self.bytes_in_flight = 0
         self.congestion_window = K_INITIAL_WINDOW
         self._congestion_recovery_start_time = 0.0
         self._congestion_stash = 0
         self._rtt_monitor = QuicRttMonitor()
         self.ssthresh: Optional[int] = None
+
+        self.lbitCounter = lbitCounter
 
     def on_packet_acked(self, packet: QuicSentPacket) -> None:
         self.bytes_in_flight -= packet.sent_bytes
@@ -155,6 +160,7 @@ class QuicPacketRecovery:
         peer_completed_address_validation: bool,
         send_probe: Callable[[], None],
         quic_logger: Optional[QuicLoggerTrace] = None,
+        lbitCounter: LBitCounter = None,
     ) -> None:
         self.max_ack_delay = 0.025
         self.peer_completed_address_validation = peer_completed_address_validation
@@ -175,7 +181,8 @@ class QuicPacketRecovery:
         self._time_of_last_sent_ack_eliciting_packet = 0.0
 
         # congestion control
-        self._cc = QuicCongestionControl()
+        self._cc = QuicCongestionControl(lbitCounter)
+        self.lbitCounter = lbitCounter
         self._pacer = QuicPacketPacer()
 
     @property
@@ -410,6 +417,10 @@ class QuicPacketRecovery:
     def _on_packets_lost(
         self, packets: Iterable[QuicSentPacket], space: QuicPacketSpace, now: float
     ) -> None:
+        for packet in packets:
+            if not is_long_header(packet.packet_type):
+                self.lbitCounter.increment()
+            
         lost_packets_cc = []
         for packet in packets:
             del space.sent_packets[packet.packet_number]

@@ -6,6 +6,7 @@ from enum import IntEnum
 from typing import List, Optional, Tuple
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from . import Measurement_Headers
 
 from ..buffer import Buffer
 from .rangeset import RangeSet
@@ -116,9 +117,6 @@ def get_retry_integrity_tag(
     return integrity_tag
 
 
-def get_spin_bit(first_byte: int) -> bool:
-    return bool(first_byte & PACKET_SPIN_BIT)
-
 
 def is_draft_version(version: int) -> bool:
     return version in (
@@ -128,6 +126,67 @@ def is_draft_version(version: int) -> bool:
         QuicProtocolVersion.DRAFT_32,
     )
 
+"""
+Depending on whether the measurementheader is active, retrieve the bits from the correct position.
+We leverage not only the additional measurement byte, but also the two reserved bits.
+-> Current configuration: [SPIN|VEC_High|VEC_Low|Delay1|Delay2|Q|R|L|T]
+
+Note: Placement for disabled measurementHeader only allows for the spin bit + 2 additional bits.
+"""
+
+def get_spin_bit(first_byte: int, second_byte: int) -> bool:
+    if Measurement_Headers.Active:
+        return bool(first_byte & PACKET_SPIN_BIT)
+    else:
+        return bool(first_byte & PACKET_SPIN_BIT)
+
+def get_vec_high_bit(first_byte: int, second_byte: int) -> bool:
+    if Measurement_Headers.Active:
+        return bool(first_byte & 0x10) 
+    else:
+        return bool(first_byte & 0x10) 
+
+def get_vec_low_bit(first_byte: int, second_byte: int) -> bool:
+    if Measurement_Headers.Active:
+        return bool(first_byte & 0x08) 
+    else:
+        return bool(first_byte & 0x08) 
+
+def get_delay_bit_paper(first_byte: int, second_byte: int) -> bool:
+    if Measurement_Headers.Active:
+        return bool(first_byte & 0x04) 
+    else:
+        return bool(first_byte & 0x10)
+
+def get_delay_bit_draft(first_byte: int, second_byte: int) -> bool:
+    if Measurement_Headers.Active:
+        return bool(first_byte & 0x02) 
+    else:
+        return bool(first_byte & 0x10)
+
+def get_qbit(first_byte: int, second_byte: int) -> bool:
+    if Measurement_Headers.Active:
+        return bool(second_byte & 0x80)
+    else:
+        return bool(first_byte & 0x10)
+
+def get_rbit(first_byte: int, second_byte: int) -> bool:
+    if Measurement_Headers.Active:
+        return bool(second_byte & 0x40)
+    else:
+        return bool(first_byte & 0x08)
+
+def get_lbit(first_byte: int, second_byte: int) -> bool:
+    if Measurement_Headers.Active:
+        return bool(second_byte & 0x20)
+    else:
+        return bool(first_byte & 0x08)
+
+def get_tbit(first_byte: int, second_byte: int) -> bool:
+    if Measurement_Headers.Active:
+        return bool(second_byte & 0x10)
+    else:
+        return bool(first_byte & 0x08)
 
 def is_long_header(first_byte: int) -> bool:
     return bool(first_byte & PACKET_LONG_HEADER)
@@ -195,6 +254,12 @@ def pull_quic_header(buf: Buffer, host_cid_length: Optional[int] = None) -> Quic
             raise ValueError("Packet fixed bit is zero")
 
         packet_type = first_byte & PACKET_TYPE_MASK
+
+        ## Make sure to also pull the second byte if measurement headers are active
+        if Measurement_Headers.Active:
+            second_byte = buf.pull_uint8()
+
+
         destination_cid = buf.pull_bytes(host_cid_length)
         return QuicHeader(
             is_long_header=False,
@@ -448,6 +513,9 @@ NON_IN_FLIGHT_FRAME_TYPES = frozenset(
         QuicFrameType.ACK_ECN,
         QuicFrameType.TRANSPORT_CLOSE,
         QuicFrameType.APPLICATION_CLOSE,
+        # Remove datagram packets from "in flight" considerations to allow for steady packet flow
+        QuicFrameType.DATAGRAM,
+        QuicFrameType.DATAGRAM_WITH_LENGTH,
     ]
 )
 

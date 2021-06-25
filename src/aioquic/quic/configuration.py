@@ -12,6 +12,43 @@ from ..tls import (
 from .logger import QuicLogger
 from .packet import QuicProtocolVersion
 
+from enum import IntEnum
+
+
+"""
+Define available EFM variants as well as possible combinations.
+Note that not all of these variants and combinations have been updated/validated.
+
+Depending on the `EFMVariants` value configured (and whether measurementheaders are enabled), 
+the `packet_builder.py` will include different bits into the header.
+
+Known to be working correctly are the LOSS_MECHANISMS (4,5,6,7,12,13).
+The delay variants are **NOT TESTED**.
+"""
+class EFMVariants(IntEnum):
+    SPIN = 1
+    DELAY_PAPER = 2
+    DELAY_DRAFT = 3 
+
+    T_BIT_RTPL = 4
+    Q_BIT_SQUARE = 5
+    L_BIT_LOSS_EVENT = 6
+    R_BIT_REFLECTION_SQUARE = 7
+
+    SPIN_DELAY_PAPER = 8
+    SPIN_DELAY_DRAFT = 9
+    SPIN_DELAY_PAPER_DELAY_DRAFT = 10
+
+    SPIN_DELAY_PAPER_T_BIT_RTPL = 11
+    SPIN_Q_BIT_SQUARE_R_BIT_REFLECTION_SQUARE = 12
+    SPIN_Q_BIT_SQUARE_L_BIT_LOSS_EVENT = 13
+    SPIN_VEC = 14
+    SPIN_DELAY_DRAFT_T_BIT_RTPL = 15
+
+    ALL_MEASUREMENTS = 42
+    LOSS_MECHANISMS = 43
+
+
 
 @dataclass
 class QuicConfiguration:
@@ -73,6 +110,11 @@ class QuicConfiguration:
     session_ticket: Optional[SessionTicket] = None
     """
     The TLS session ticket which should be used for session resumption.
+    """
+
+    efm_variants: EFMVariants = None
+    """
+    Which EFM variants should be used.
     """
 
     cadata: Optional[bytes] = None

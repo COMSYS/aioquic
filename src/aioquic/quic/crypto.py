@@ -5,6 +5,8 @@ from .._crypto import AEAD, CryptoError, HeaderProtection
 from ..tls import CipherSuite, cipher_suite_hash, hkdf_expand_label, hkdf_extract
 from .packet import decode_packet_number, is_draft_version, is_long_header
 
+from . import Measurement_Headers
+
 CIPHER_SUITES = {
     CipherSuite.AES_128_GCM_SHA256: (b"aes-128-ecb", b"aes-128-gcm"),
     CipherSuite.AES_256_GCM_SHA384: (b"aes-256-ecb", b"aes-256-gcm"),
@@ -71,8 +73,19 @@ class CryptoContext:
         plain_header, packet_number = self.hp.remove(packet, encrypted_offset)
         first_byte = plain_header[0]
 
+        second_byte = None
+        if Measurement_Headers.Active:
+            second_byte = plain_header[1]
+
         # packet number
-        pn_length = (first_byte & 0x03) + 1
+        ## Account for measurementheader when retrieving the pn length
+        if Measurement_Headers.Active:
+            if not is_long_header(first_byte):
+                pn_length = (second_byte & 0x03) + 1
+            else:
+                pn_length = (first_byte & 0x03) + 1
+        else:
+            pn_length = (first_byte & 0x03) + 1
         packet_number = decode_packet_number(
             packet_number, pn_length * 8, expected_packet_number
         )
@@ -80,7 +93,13 @@ class CryptoContext:
         # detect key phase change
         crypto = self
         if not is_long_header(first_byte):
-            key_phase = (first_byte & 4) >> 2
+            
+            key_phase = None
+            ## Account for measurementheader when retrieving the key_phase
+            if Measurement_Headers.Active:
+                key_phase = (second_byte & 4) >> 2
+            else:
+                key_phase = (first_byte & 4) >> 2
             if key_phase != self.key_phase:
                 crypto = next_key_phase(self)
 

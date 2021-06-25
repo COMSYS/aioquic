@@ -7,6 +7,8 @@ from enum import Enum
 from functools import partial
 from typing import Any, Deque, Dict, FrozenSet, List, Optional, Sequence, Set, Tuple
 
+import time
+
 from .. import tls
 from ..buffer import UINT_VAR_MAX, Buffer, BufferReadError, size_uint_var
 from . import events
@@ -32,6 +34,14 @@ from .packet import (
     get_retry_integrity_tag,
     get_spin_bit,
     is_draft_version,
+    get_qbit,
+    get_rbit,
+    get_lbit,
+    get_delay_bit_paper,
+    get_delay_bit_draft,
+    get_tbit,
+    get_vec_high_bit,
+    get_vec_low_bit,
     is_long_header,
     pull_ack_frame,
     pull_quic_header,
@@ -44,6 +54,14 @@ from .packet_builder import (
     QuicDeliveryState,
     QuicPacketBuilder,
     QuicPacketBuilderStop,
+    ValidEdgeCounter,
+    QBitCounter,
+    RBitCounter,
+    LBitCounter,
+    DelayMarkerPaper,
+    DelayMarkerDraft,
+    TBitClient,
+    TBitServer
 )
 from .recovery import K_GRANULARITY, QuicPacketRecovery, QuicPacketSpace
 from .stream import FinalSizeError, QuicStream
@@ -336,6 +354,21 @@ class QuicConnection:
             self._original_destination_connection_id = (
                 original_destination_connection_id
             )
+        
+        """
+        Initialize the different EFM variants
+        """
+        self._valid_edge_counter = ValidEdgeCounter()
+        self._qbit = QBitCounter()
+        self._rbit = RBitCounter()
+        self._lbit = LBitCounter()
+        self._delay_marker_paper = DelayMarkerPaper(is_client=configuration.is_client)
+        self._delay_marker_draft = DelayMarkerDraft(is_client=configuration.is_client)
+
+        if configuration.is_client:
+            self._tbit = TBitClient()
+        else:
+            self._tbit = TBitServer()
 
         # logging
         self._logger = QuicConnectionAdapter(
@@ -353,6 +386,7 @@ class QuicConnection:
             peer_completed_address_validation=not self._is_client,
             quic_logger=self._quic_logger,
             send_probe=self._send_probe,
+            lbitCounter=self._lbit
         )
 
         # things to send
@@ -496,6 +530,14 @@ class QuicConnection:
             quic_logger=self._quic_logger,
             spin_bit=self._spin_bit,
             version=self._version,
+            qbit=self._qbit,
+            rbit=self._rbit,
+            lbit=self._lbit,
+            delay_marker_paper=self._delay_marker_paper,
+            valid_edge_counter=self._valid_edge_counter,
+            delay_marker_draft=self._delay_marker_draft,
+            tbit=self._tbit,
+            efm_variants=self._configuration.efm_variants
         )
         if self._close_pending:
             epoch_packet_types = []
@@ -877,7 +919,8 @@ class QuicConnection:
             if header.is_long_header:
                 reserved_mask = 0x0C
             else:
-                reserved_mask = 0x18
+                # Remove header protection from the reserved bits
+                reserved_mask = 0x00
             if plain_header[0] & reserved_mask:
                 self.close(
                     error_code=QuicErrorCode.PROTOCOL_VIOLATION,
@@ -924,14 +967,53 @@ class QuicConnection:
                 self._remote_initial_source_connection_id = header.source_cid
                 self._set_state(QuicConnectionState.CONNECTED)
 
+
+
+            ### Register incoming packet for the Tbit generation counter
+            self._tbit.incoming_packet()
+
             # update spin bit
             if not header.is_long_header and packet_number > self._spin_highest_pn:
-                spin_bit = get_spin_bit(plain_header[0])
+                spin_bit = get_spin_bit(plain_header[0], plain_header[1])
+
+
+
+                ## VEC Rx-Tx Latency Stuff -> Detect edges about to happen
+                ## case 1: Server and incoming bit is different to the one sent out previously -> a new edge is there
+                if not self._is_client and spin_bit != self._spin_bit:
+                    self._valid_edge_counter.setEdgeRXTime(time.time())
+                    self._valid_edge_counter.set_generateEdge()
+                    self._valid_edge_counter.set_phase(1 if get_vec_high_bit(plain_header[0], plain_header[1]) else 0, 1 if get_vec_low_bit(plain_header[0], plain_header[1]) else 0)
+                
+                ## case 2: Client and incoming bit is the same as the one previously sent out -> the edge is back
+                elif self._is_client and spin_bit == self._spin_bit:
+                    self._valid_edge_counter.setEdgeRXTime(time.time())
+                    self._valid_edge_counter.set_generateEdge()
+                    self._valid_edge_counter.set_phase(1 if get_vec_high_bit(plain_header[0], plain_header[1]) else 0, 1 if get_vec_low_bit(plain_header[0], plain_header[1]) else 0)
+
+
+                # Before spinning the spin bit, remember the previous spin
+                previous_spin = self._spin_bit
+
                 if self._is_client:
                     self._spin_bit = not spin_bit
                 else:
                     self._spin_bit = spin_bit
                 self._spin_highest_pn = packet_number
+
+
+                ## The spin bit has spinned and this is a client
+                if self._is_client and previous_spin != self._spin_bit:
+
+                    ## Signal spin bit spin to Tbit
+                    self._tbit.spin_flip()
+
+                    ### In this case, the delay bit was not set on the first packet of the new spin bit cycle
+                    ### Trigger a regeneration
+                    if not get_delay_bit_paper(plain_header[0], plain_header[1]) or self._delay_marker_paper.dropped:
+                        # spin period did not end correctly, delay bit was not set,
+                        # therefor trigger regeneration
+                        self._delay_marker_paper.trigger_generation()
 
                 if self._quic_logger is not None:
                     self._quic_logger.log_event(
@@ -939,6 +1021,22 @@ class QuicConnection:
                         event="spin_bit_updated",
                         data={"state": self._spin_bit},
                     )
+
+            # handle delay bit
+            if not header.is_long_header and get_delay_bit_paper(plain_header[0], plain_header[1]):
+                self._delay_marker_paper.set_mark_next(received_spin=get_spin_bit(plain_header[0], plain_header[1]))
+
+            if not header.is_long_header and get_delay_bit_draft(plain_header[0], plain_header[1]):
+                self._delay_marker_draft.set_mark_next()
+
+            # Handle TBit
+            if not header.is_long_header:
+                self._tbit.receive_tbit(get_tbit(plain_header[0], plain_header[1]))
+
+            # Handle QBit
+            if not header.is_long_header:
+                self._rbit.receive_qbit(get_qbit(plain_header[0], plain_header[1]))
+
 
             # handle payload
             context = QuicReceiveContext(
@@ -2177,6 +2275,7 @@ class QuicConnection:
         buf = Buffer(data=plain)
 
         frame_found = False
+
         is_ack_eliciting = False
         is_probing = None
         while not buf.eof():

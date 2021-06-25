@@ -3,6 +3,7 @@
 #include <Python.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
+#include <stdio.h>
 
 #define MODULE_NAME "aioquic._crypto"
 
@@ -27,6 +28,11 @@
         PyErr_SetString(CryptoError, "OpenSSL call failed"); \
         return -1; \
     }
+
+// Variable indicating whether we use the extended measurementheader (=1) or not (!=0)
+// The measurementheader is basically another byte added after the spin bit without header protection
+// TODO: Make this adjustable at runtime
+int MeasurementHeaders = 1;
 
 static PyObject *CryptoError;
 
@@ -308,7 +314,19 @@ HeaderProtection_apply(HeaderProtectionObject *self, PyObject *args)
     if (!PyArg_ParseTuple(args, "y#y#", &header, &header_len, &payload, &payload_len))
         return NULL;
 
-    int pn_length = (header[0] & 0x03) + 1;
+    // Account for measurementheader when retrieving the pn length
+    int pn_length;
+    if (MeasurementHeaders == 1) {
+        if (header[0] & 0x80) {
+            pn_length = (header[0] & 0x03) + 1;
+        // If the measurementheader is enabled, the pn length is pushed one byte back
+        } else {
+            pn_length = (header[1] & 0x03) + 1;
+        }
+    } else {
+        pn_length = (header[0] & 0x03) + 1;
+    }
+    
     int pn_offset = header_len - pn_length;
 
     res = HeaderProtection_mask(self, payload + PACKET_NUMBER_LENGTH_MAX - pn_length);
@@ -317,11 +335,25 @@ HeaderProtection_apply(HeaderProtectionObject *self, PyObject *args)
     memcpy(self->buffer, header, header_len);
     memcpy(self->buffer + header_len, payload, payload_len);
 
-    if (self->buffer[0] & 0x80) {
-        self->buffer[0] ^= self->mask[0] & 0x0F;
+
+    // Account for measurementheader when applying the header protection
+    if (MeasurementHeaders == 1) {
+        if (self->buffer[0] & 0x80) {
+            self->buffer[0] ^= self->mask[0] & 0x0F;
+        // If the measurementheader is enabled, the complete first byte is unprotected as well as the initial part of the second byte
+        } else {
+            self->buffer[0] ^= self->mask[0] & 0x00;
+            self->buffer[1] ^= self->mask[0] & 0x07;
+        }
     } else {
-        self->buffer[0] ^= self->mask[0] & 0x1F;
+        if (self->buffer[0] & 0x80) {
+            self->buffer[0] ^= self->mask[0] & 0x0F;
+        } else {
+            // Increase the range of the unprotected bits to also include the two reserved bits
+            self->buffer[0] ^= self->mask[0] & 0x07;
+        }
     }
+
 
     for (int i = 0; i < pn_length; ++i) {
         self->buffer[pn_offset + i] ^= self->mask[1 + i];
@@ -345,13 +377,37 @@ HeaderProtection_remove(HeaderProtectionObject *self, PyObject *args)
 
     memcpy(self->buffer, packet, pn_offset + PACKET_NUMBER_LENGTH_MAX);
 
-    if (self->buffer[0] & 0x80) {
-        self->buffer[0] ^= self->mask[0] & 0x0F;
-    } else {
-        self->buffer[0] ^= self->mask[0] & 0x1F;
+    // Account for measurementheader when removing header protection (see HeaderProtection_apply)
+    if (MeasurementHeaders == 1) {
+        if (self->buffer[0] & 0x80) {
+            self->buffer[0] ^= self->mask[0] & 0x0F;
+        } else {
+            self->buffer[0] ^= self->mask[0] & 0x00;
+            self->buffer[1] ^= self->mask[0] & 0x07;
+        }
+
+    } else{
+
+        if (self->buffer[0] & 0x80) {
+            self->buffer[0] ^= self->mask[0] & 0x0F;
+        } else {
+            self->buffer[0] ^= self->mask[0] & 0x07;
+        }
+
     }
 
-    int pn_length = (self->buffer[0] & 0x03) + 1;
+    // Account for measurementheader when retrieving pn length (see HeaderProtection_apply)
+    int pn_length;
+    if (MeasurementHeaders == 1) {
+        if (self->buffer[0] & 0x80) {
+            pn_length = (self->buffer[0] & 0x03) + 1;
+        } else {
+            pn_length = (self->buffer[1] & 0x03) + 1;
+        }
+    } else {
+        pn_length = (self->buffer[0] & 0x03) + 1;
+    }
+    
     uint32_t pn_truncated = 0;
     for (int i = 0; i < pn_length; ++i) {
         self->buffer[pn_offset + i] ^= self->mask[1 + i];
